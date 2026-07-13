@@ -14,7 +14,6 @@ on:
         type: choice
         options:
           - cuda
-          - intel-igpu
 
 permissions:
   contents: write
@@ -72,46 +71,3 @@ jobs:
           gh release upload "${RELEASE_TAG}" "${ASSET}".part* "${ASSET}.sha256" \
             --repo "${{ github.repository }}" --clobber
 
-  intel-igpu:
-    if: ${{ github.event.inputs.addon == 'intel-igpu' }}
-    # Pinned to 22.04 for stable Intel Compute Runtime package names.
-    runs-on: ubuntu-22.04
-    env:
-      RELEASE_TAG: addons-intel-igpu-v1
-      ASSET: aero-nvr-intel-igpu.tar.gz
-    steps:
-      - name: Install + vendor a relocatable Intel OpenCL runtime
-        run: |
-          # NOTE: relocating the Intel Compute Runtime is fiddly; this bundle
-          # needs validation on a real Intel iGPU host. OpenVINO's GPU plugin is
-          # already in the base image; this only supplies the OpenCL driver
-          # (libigdrcl.so) + IGC/GMM deps so the plugin can bind.
-          sudo apt-get update
-          sudo apt-get install -y intel-opencl-icd
-          mkdir -p bundle/lib bundle/etc/OpenCL/vendors
-          find /usr/lib -name 'libigdrcl.so*' -exec cp -aL {} bundle/lib/ \;
-          for p in libigc libigdfcl libopencl-clang libigdgmm; do
-            find /usr/lib -name "${p}*.so*" -exec cp -aL {} bundle/lib/ \;
-          done
-          echo "libigdrcl.so" > bundle/etc/OpenCL/vendors/intel.icd
-          echo "== vendored libs =="; ls -lh bundle/lib
-
-      - name: Tarball + split into <2 GiB parts
-        run: |
-          tar czf "${ASSET}" -C bundle .
-          split -b 1900m -d -a 3 "${ASSET}" "${ASSET}.part"
-          rm -f "${ASSET}"
-          sha256sum "${ASSET}".part* > "${ASSET}.sha256"
-          ls -lh "${ASSET}".part*
-
-      - name: Publish parts to the release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if ! gh release view "${RELEASE_TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            gh release create "${RELEASE_TAG}" --repo "${{ github.repository }}" \
-              --title "Intel iGPU add-on (OpenVINO GPU / OpenCL runtime)" \
-              --notes "Relocatable Intel Compute Runtime (OpenCL driver + IGC/GMM) for the in-app Hardware Add-ons installer. Needs validation on real Intel iGPU hardware."
-          fi
-          gh release upload "${RELEASE_TAG}" "${ASSET}".part* "${ASSET}.sha256" \
-            --repo "${{ github.repository }}" --clobber
