@@ -1,0 +1,109 @@
+name: Build Hardware Add-on Bundles
+
+# Builds the opt-in accelerator runtime bundles for Aero NVR and publishes them
+# as releases in THIS (public) repo, so the in-app installer can download them
+# anonymously. Uses the built-in GITHUB_TOKEN — no PAT secret required.
+# Run manually: Actions -> this workflow -> Run workflow -> pick the add-on.
+on:
+  workflow_dispatch:
+    inputs:
+      addon:
+        description: "Which add-on bundle to build"
+        required: true
+        default: cuda
+        type: choice
+        options:
+          - cuda
+          - intel-igpu
+
+permissions:
+  contents: write
+
+jobs:
+  cuda:
+    if: ${{ github.event.inputs.addon == 'cuda' }}
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: addons-cuda-cu118-v1
+      ASSET: aero-nvr-cuda-cu118.tar.gz
+    steps:
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Resolve + vendor the CUDA runtime (pre-resolved, no runtime pip)
+        run: |
+          # Keep these pins in sync with the base image's requirements.txt
+          # (onnxruntime 1.18 / torch 2.2.2). --target makes a relocatable tree.
+          python -m pip install --upgrade pip
+          pip install --target build/site-packages \
+            --extra-index-url https://download.pytorch.org/whl/cu118 \
+            onnxruntime-gpu==1.18.0 \
+            torch==2.2.2+cu118 \
+            torchvision==0.17.2+cu118
+          find build/site-packages -type d -name "__pycache__" -prune -exec rm -rf {} +
+
+      - name: Tarball + split into <2 GiB parts (GitHub asset limit)
+        run: |
+          tar czf "${ASSET}" -C build site-packages
+          split -b 1900m -d -a 3 "${ASSET}" "${ASSET}.part"
+          rm -f "${ASSET}"
+          sha256sum "${ASSET}".part* > "${ASSET}.sha256"
+          ls -lh "${ASSET}".part*
+
+      - name: Publish parts to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! gh release view "${RELEASE_TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release create "${RELEASE_TAG}" --repo "${{ github.repository }}" \
+              --title "NVIDIA CUDA add-on (cu118)" \
+              --notes "Pre-resolved onnxruntime-gpu 1.18 + torch 2.2.2 cu118 runtime for the in-app Hardware Add-ons installer. Split into <2 GiB parts."
+          fi
+          gh release upload "${RELEASE_TAG}" "${ASSET}".part* "${ASSET}.sha256" \
+            --repo "${{ github.repository }}" --clobber
+
+  intel-igpu:
+    if: ${{ github.event.inputs.addon == 'intel-igpu' }}
+    # Pinned to 22.04 for stable Intel Compute Runtime package names.
+    runs-on: ubuntu-22.04
+    env:
+      RELEASE_TAG: addons-intel-igpu-v1
+      ASSET: aero-nvr-intel-igpu.tar.gz
+    steps:
+      - name: Install + vendor a relocatable Intel OpenCL runtime
+        run: |
+          # NOTE: relocating the Intel Compute Runtime is fiddly; this bundle
+          # needs validation on a real Intel iGPU host. OpenVINO's GPU plugin is
+          # already in the base image; this only supplies the OpenCL driver
+          # (libigdrcl.so) + IGC/GMM deps so the plugin can bind.
+          sudo apt-get update
+          sudo apt-get install -y intel-opencl-icd
+          mkdir -p bundle/lib bundle/etc/OpenCL/vendors
+          find /usr/lib -name 'libigdrcl.so*' -exec cp -aL {} bundle/lib/ \;
+          for p in libigc libigdfcl libopencl-clang libigdgmm; do
+            find /usr/lib -name "${p}*.so*" -exec cp -aL {} bundle/lib/ \;
+          done
+          echo "libigdrcl.so" > bundle/etc/OpenCL/vendors/intel.icd
+          echo "== vendored libs =="; ls -lh bundle/lib
+
+      - name: Tarball + split into <2 GiB parts
+        run: |
+          tar czf "${ASSET}" -C bundle .
+          split -b 1900m -d -a 3 "${ASSET}" "${ASSET}.part"
+          rm -f "${ASSET}"
+          sha256sum "${ASSET}".part* > "${ASSET}.sha256"
+          ls -lh "${ASSET}".part*
+
+      - name: Publish parts to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! gh release view "${RELEASE_TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release create "${RELEASE_TAG}" --repo "${{ github.repository }}" \
+              --title "Intel iGPU add-on (OpenVINO GPU / OpenCL runtime)" \
+              --notes "Relocatable Intel Compute Runtime (OpenCL driver + IGC/GMM) for the in-app Hardware Add-ons installer. Needs validation on real Intel iGPU hardware."
+          fi
+          gh release upload "${RELEASE_TAG}" "${ASSET}".part* "${ASSET}.sha256" \
+            --repo "${{ github.repository }}" --clobber
