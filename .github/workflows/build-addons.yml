@@ -40,7 +40,13 @@ jobs:
             --extra-index-url https://download.pytorch.org/whl/cu118 \
             onnxruntime-gpu==1.18.0 \
             torch==2.2.2+cu118 \
-            torchvision==0.17.2+cu118
+            torchvision==0.17.2+cu118 \
+            PyNvVideoCodec==2.1.0 \
+            av==18.0.0
+          # PyNvVideoCodec (NVDEC) + av (PyAV demux) power the GPU-resident
+          # main-stream reader (NVDECGpuReader): the 4K frame is decoded on NVDEC
+          # and kept in VRAM as a CUDA tensor, so detection never copies it to the
+          # CPU. Neither pulls numpy, so the numpy/pillow strip below stays valid.
           find build/site-packages -type d -name "__pycache__" -prune -exec rm -rf {} +
           # CRITICAL: the base image pins numpy 1.26.4 and its native modules
           # (faiss, onnxruntime, opencv, openvino) are compiled against numpy 1.x.
