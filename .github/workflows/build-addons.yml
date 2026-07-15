@@ -56,6 +56,23 @@ jobs:
           # the bundle only supplies GPU-specific bits (onnxruntime-gpu, torch cu118).
           rm -rf build/site-packages/numpy build/site-packages/numpy.libs build/site-packages/numpy-*.dist-info
           rm -rf build/site-packages/PIL build/site-packages/pillow* build/site-packages/Pillow-*.dist-info
+          # CRITICAL: cuDNN 8 dlopen()s the plain SONAME "libnvrtc.so", but the pip
+          # wheel ships only the versioned libnvrtc.so.11.2. Without this link,
+          # libcudnn_cnn_infer.so.8 fails to load ("Could not load library
+          # libcudnn_cnn_infer.so.8. Error: libnvrtc.so: cannot open shared object
+          # file"), the detector dies on its FIRST inference, s6 restarts the
+          # backend, and the whole site flaps every ~5 seconds. The base image used
+          # to carry this symlink; it was dropped when the CUDA stack moved out of
+          # the image and the bundle never re-created it. Relative, so it stays
+          # valid wherever /config/addons/<id> is extracted.
+          d=build/site-packages/nvidia/cuda_nvrtc/lib
+          so=$(ls "$d"/libnvrtc.so.* 2>/dev/null | head -1)
+          if [ -z "$so" ]; then
+            echo "::error::libnvrtc.so.* not found in $d -- CUDA add-on would crashloop"
+            exit 1
+          fi
+          ln -sfn "$(basename "$so")" "$d/libnvrtc.so"
+          echo "linked libnvrtc.so -> $(basename "$so")"
 
       - name: Tarball + split into <2 GiB parts (GitHub asset limit)
         run: |
