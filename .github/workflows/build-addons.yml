@@ -1,8 +1,9 @@
-name: Build Hardware Add-on Bundles
+name: Build Add-on Bundles
 
-# Builds the opt-in accelerator runtime bundles for Aero NVR and publishes them
-# as releases in THIS (public) repo, so the in-app installer can download them
-# anonymously. Uses the built-in GITHUB_TOKEN — no PAT secret required.
+# Builds the opt-in add-on bundles for Aero NVR (accelerator runtimes and
+# camera-integration services) and publishes them as releases in THIS (public)
+# repo, so the in-app installer can download them anonymously. Uses the
+# built-in GITHUB_TOKEN — no PAT secret required.
 # Run manually: Actions -> this workflow -> Run workflow -> pick the add-on.
 on:
   workflow_dispatch:
@@ -14,6 +15,7 @@ on:
         type: choice
         options:
           - cuda
+          - blink
 
 permissions:
   contents: write
@@ -94,3 +96,54 @@ jobs:
           gh release upload "${RELEASE_TAG}" "${ASSET}".part* "${ASSET}.sha256" \
             --repo "${{ github.repository }}" --clobber
 
+
+  blink:
+    if: ${{ github.event.inputs.addon == 'blink' }}
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: addons-blink-v1
+      ASSET: aero-nvr-blink.tar.gz
+      MEDIAMTX_VERSION: v1.11.3
+    steps:
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Vendor blinkpy + MediaMTX (pre-resolved, no runtime pip)
+        run: |
+          # blinkpy pin matches the Scrypted Blink plugin; 0.25.x is the first
+          # line with native immis livestream support. Installed with Python
+          # 3.11 so any compiled wheels (aiohttp/multidict/yarl) are cp311,
+          # matching the base image's interpreter. The bundle's site-packages
+          # are only put on the BRIDGE child process's PYTHONPATH (see
+          # blink_service.py in the app repo), never the backend's, so no
+          # numpy/pillow stripping is needed here.
+          python -m pip install --upgrade pip
+          pip install --target build/site-packages blinkpy==0.25.7
+          find build/site-packages -type d -name "__pycache__" -prune -exec rm -rf {} +
+          # MediaMTX: the loopback RTSP server the bridge publishes into. Keep
+          # the version in sync with the config keys blink_service.py generates
+          # (rtspTransports etc. — validated against v1.11.x).
+          mkdir -p build/bin
+          curl -fsSL "https://github.com/bluenviron/mediamtx/releases/download/${MEDIAMTX_VERSION}/mediamtx_${MEDIAMTX_VERSION}_linux_amd64.tar.gz" \
+            | tar xz -C build/bin mediamtx
+
+      - name: Tarball (single part; installer expects .part000 naming)
+        run: |
+          tar czf "${ASSET}" -C build site-packages bin
+          mv "${ASSET}" "${ASSET}.part000"
+          sha256sum "${ASSET}".part* > "${ASSET}.sha256"
+          ls -lh "${ASSET}".part*
+
+      - name: Publish parts to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! gh release view "${RELEASE_TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release create "${RELEASE_TAG}" --repo "${{ github.repository }}" \
+              --title "Blink camera add-on" \
+              --notes "Pre-resolved blinkpy runtime + MediaMTX for the in-app Blink camera integration add-on."
+          fi
+          gh release upload "${RELEASE_TAG}" "${ASSET}".part* "${ASSET}.sha256" \
+            --repo "${{ github.repository }}" --clobber
